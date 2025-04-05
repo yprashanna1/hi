@@ -6,32 +6,31 @@ import os
 import uuid
 import cv2
 from ultralytics import YOLO
-from typing import Optional
+from pyngrok import ngrok
+import numpy as np
 
 app = FastAPI()
+
+# Add CORS middleware to allow for cross-origin requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Change this to specific origins in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-model_path = "best.pt"
-if not os.path.exists(model_path):
-    raise FileNotFoundError(f"Model file not found at {model_path}.")
-
+# Load the YOLO model (path should be updated to where 'best.pt' is located in Colab)
+model_path = "/mnt/data/best.pt"  # Update this path if necessary
 model = YOLO(model_path)
 
 @app.get("/")
 def home():
-    return {"message": "Accident detection online"}
+    return {"message": "Accident detection API is live!"}
 
 @app.post("/upload")
-async def upload_video(
-    file: UploadFile = File(...),
-    return_annotated_video: bool = False
-):
+async def upload_video(file: UploadFile = File(...), return_annotated_video: bool = False):
+    # Save the uploaded video or image temporarily
     tmp_file = f"/tmp/{uuid.uuid4()}{os.path.splitext(file.filename)[1]}"
     with open(tmp_file, "wb") as f:
         f.write(await file.read())
@@ -40,19 +39,35 @@ async def upload_video(
     is_video = ext in ["mp4", "avi", "mov", "mkv", "wmv"]
 
     if not is_video:
+        # If the uploaded file is an image, run YOLOv8 inference on the single image
         frame = cv2.imread(tmp_file)
         results = model.predict(frame, conf=0.25)
+        
+        # Change bounding box colors based on accident detection
         boxes = []
         for box in results[0].boxes:
             cls_id = int(box.cls[0])
             conf = float(box.conf[0])
             x_center, y_center, w, h = box.xywh[0]
+            
+            # Assume class 0 is "no accident" and class 1 is "accident" (adjust according to your model)
+            if model.names[cls_id] == "accident":
+                color = (0, 0, 255)  # Red for accident
+            else:
+                color = (0, 255, 0)  # Green for no accident
+
             boxes.append({
                 "class_id": cls_id,
                 "class_name": model.names[cls_id],
                 "confidence": conf,
                 "xywh": [float(x_center), float(y_center), float(w), float(h)]
             })
+            
+            # Draw the bounding box with the specified color and reduced width
+            frame = cv2.rectangle(frame, 
+                                  (int(x_center - w/2), int(y_center - h/2)), 
+                                  (int(x_center + w/2), int(y_center + h/2)), 
+                                  color, 2)  # The "2" here reduces the thickness of the box
         os.remove(tmp_file)
         return {"type": "image", "detections": boxes}
 
@@ -61,6 +76,7 @@ async def upload_video(
         os.remove(tmp_file)
         return JSONResponse({"error": "Cannot open video"}, status_code=400)
 
+    # If user wants an annotated video, create a temp file
     out_path = f"/tmp/{uuid.uuid4()}.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -77,9 +93,29 @@ async def upload_video(
         if not ret:
             break
         results = model.predict(frame, conf=0.25)
+        
+        # Annotate frames with bounding boxes and colors
         if return_annotated_video:
-            annotated = results[0].plot()
-            writer.write(annotated)
+            for box in results[0].boxes:
+                cls_id = int(box.cls[0])
+                conf = float(box.conf[0])
+                x_center, y_center, w, h = box.xywh[0]
+
+                # Assume class 0 is "no accident" and class 1 is "accident" (adjust according to your model)
+                if model.names[cls_id] == "accident":
+                    color = (0, 0, 255)  # Red for accident
+                else:
+                    color = (0, 255, 0)  # Green for no accident
+
+                # Reduce the thickness of the bounding box
+                frame = cv2.rectangle(frame, 
+                                      (int(x_center - w/2), int(y_center - h/2)), 
+                                      (int(x_center + w/2), int(y_center + h/2)), 
+                                      color, 2)
+
+            writer.write(frame)
+
+        # Collect bounding box data for JSON response
         boxes = []
         for box in results[0].boxes:
             cls_id = int(box.cls[0])
@@ -109,4 +145,4 @@ async def upload_video(
         return {"type": "video", "frames": len(frames_info), "results": frames_info}
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=80)
+    uvicorn.run("main:app", host="0.0.0.0", port=5000)
